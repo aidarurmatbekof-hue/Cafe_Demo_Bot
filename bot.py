@@ -86,7 +86,7 @@ async def handle_order(message: Message):
         for name, price in picked:
             lines.append(f"• {name} — {price} сом")
         lines.append(f"\nИтого: {total} сом")
-        lines.append("\nЗаказ принят! Мы свяжемся с вами.")
+        lines.append(f"\nДля подтверждения заказа позвоните: {CAFE_PHONE}")
         await message.answer("\n".join(lines))
     except (ValueError, IndexError):
         await message.answer("Не понял заказ. Используйте формат: 1, 2, 3")
