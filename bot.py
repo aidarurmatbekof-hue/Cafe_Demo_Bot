@@ -1,10 +1,11 @@
 import os
 import asyncio
 import logging
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
@@ -30,6 +31,8 @@ CAFE_NAME = "☕ Кафе Дастан"
 CAFE_ADDRESS = "Бишкек, ул. Чуй 100"
 CAFE_PHONE = "+996 555 12 34 56"
 CAFE_HOURS = "09:00 – 23:00 ежедневно"
+MBANK_NUMBER = "+996 700 123 456"
+MBANK_HOLDER = "ДАСТАН К."
 
 MENU = {
     "coffee": {
@@ -80,6 +83,10 @@ def flat_menu():
     return items
 
 
+orders_db: dict[int, dict] = {}
+order_counter = 1000
+pending_orders: dict[int, dict] = {}
+
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📋 Меню"), KeyboardButton(text="🛒 Заказать")],
@@ -107,6 +114,15 @@ def back_kb():
     )
 
 
+def payment_kb(order_id: int):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Я оплатил", callback_data=f"paid:{order_id}")],
+            [InlineKeyboardButton(text="❌ Отменить заказ", callback_data=f"cancel:{order_id}")],
+        ]
+    )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     name = message.from_user.first_name or "гость"
@@ -116,7 +132,8 @@ async def cmd_start(message: Message):
         "Здесь вы можете:\n"
         "📋 Посмотреть наше меню\n"
         "🛒 Сделать заказ\n"
-        "📞 Узнать контакты и адрес\n\n"
+        "💳 Оплатить онлайн\n"
+        "📞 Узнать контакты\n\n"
         "Выбирайте кнопки ниже 👇"
     )
     await message.answer(text, reply_markup=main_kb)
@@ -224,6 +241,7 @@ async def show_about(message: Message):
 
 @dp.message(F.text.regexp(r"^[\d\s,]+$"))
 async def handle_order(message: Message):
+    global order_counter
     try:
         items = flat_menu()
         nums = [int(x.strip()) for x in message.text.split(",") if x.strip()]
@@ -232,18 +250,93 @@ async def handle_order(message: Message):
             await message.answer("❌ Не понял заказ. Попробуйте ещё раз.")
             return
         total = sum(p for _, p, _ in picked)
-        lines = ["<b>🛒 Ваш заказ:</b>\n"]
+        order_counter += 1
+        order_id = order_counter
+        pending_orders[order_id] = {
+            "user_id": message.from_user.id,
+            "username": message.from_user.username or message.from_user.first_name,
+            "items": picked,
+            "total": total,
+            "created_at": datetime.now().isoformat(),
+            "status": "pending",
+        }
+
+        lines = [f"<b>🛒 Заказ #{order_id}</b>\n"]
         for name, price, emoji in picked:
             lines.append(f"{emoji} {name} — {price} сом")
-        lines.append(f"\n<b>Итого: {total} сом</b>\n")
+        lines.append(f"\n<b>Итого: {total} сом</b>")
         lines.append(
-            f"📞 Для подтверждения заказа позвоните:\n<b>{CAFE_PHONE}</b>\n\n"
-            f"Или напишите нам в Whatsapp по этому же номеру.\n"
-            f"Спасибо за заказ! ❤️"
+            f"\n<b>💳 Оплата онлайн (МБанк)</b>\n"
+            f"Номер: <code>{MBANK_NUMBER}</code>\n"
+            f"Получатель: {MBANK_HOLDER}\n"
+            f"Сумма: <b>{total} сом</b>\n"
+            f"Комментарий: <code>Заказ #{order_id}</code>\n\n"
+            f"После оплаты нажмите кнопку ниже 👇"
         )
-        await message.answer("\n".join(lines))
+        await message.answer("\n".join(lines), reply_markup=payment_kb(order_id))
     except (ValueError, IndexError):
         await message.answer("❌ Не понял. Формат: <code>1, 2, 3</code>")
+
+
+@dp.callback_query(F.data.startswith("paid:"))
+async def handle_paid(call: CallbackQuery):
+    order_id = int(call.data.split(":")[1])
+    order = pending_orders.get(order_id)
+    if not order:
+        await call.answer("Заказ не найден")
+        return
+
+    order["status"] = "paid"
+    orders_db[order_id] = order
+
+    masked_phone = CAFE_PHONE[:-4] + "XXXX"
+    text = (
+        f"✅ <b>Спасибо за оплату!</b>\n\n"
+        f"Заказ <b>#{order_id}</b> принят в обработку.\n\n"
+        f"📤 Уведомление отправлено на номер <b>{masked_phone}</b>\n\n"
+        f"⏳ Ожидайте звонка от кафе в течение <b>5 минут</b> для подтверждения.\n\n"
+        f"Спасибо что выбрали {CAFE_NAME} ❤️"
+    )
+    await call.message.edit_text(text)
+    await call.answer("Оплата принята!", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("cancel:"))
+async def handle_cancel(call: CallbackQuery):
+    order_id = int(call.data.split(":")[1])
+    if order_id in pending_orders:
+        pending_orders.pop(order_id)
+    await call.message.edit_text(
+        f"❌ Заказ <b>#{order_id}</b> отменён.\n\nЖдём вас снова!"
+    )
+    await call.answer("Заказ отменён")
+
+
+@dp.message(Command("stats"))
+async def admin_stats(message: Message):
+    total_orders = len(orders_db)
+    total_revenue = sum(o["total"] for o in orders_db.values())
+    pending = len(pending_orders)
+    text = (
+        f"<b>📊 Статистика админа</b>\n\n"
+        f"Оплаченных заказов: <b>{total_orders}</b>\n"
+        f"Выручка всего: <b>{total_revenue} сом</b>\n"
+        f"Ожидают оплату: <b>{pending}</b>"
+    )
+    await message.answer(text)
+
+
+@dp.message(Command("orders"))
+async def admin_orders(message: Message):
+    if not orders_db:
+        await message.answer("Заказов пока нет.")
+        return
+    last = sorted(orders_db.items(), key=lambda x: x[0], reverse=True)[:10]
+    lines = ["<b>📋 Последние 10 заказов</b>\n"]
+    for oid, o in last:
+        ts = o["created_at"][:16].replace("T", " ")
+        lines.append(f"#{oid} — {o['total']} сом — @{o['username']} — {ts}")
+    await message.answer("\n".join(lines))
 
 
 @dp.message()
