@@ -711,16 +711,45 @@ async def cmd_report(message: Message):
     await message.answer("✅ Жалоба отправлена админам. Спасибо!")
 
 
+@dp.message(Command("myid"))
+async def cmd_myid(message: Message):
+    uid = message.from_user.id
+    await message.answer(
+        f"🆔 <b>Твой Telegram ID:</b>\n\n"
+        f"<code>{uid}</code>\n\n"
+        "Скопируй это число и добавь на Railway:\n"
+        "<b>Variables</b> → <b>+ New Variable</b>\n"
+        f"Name: <code>ADMIN_CHAT_ID</code>\n"
+        f"Value: <code>{uid}</code>"
+    )
+
+
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
-    ADMIN_IDS.add(message.from_user.id)
-    await message.answer(
-        "✅ <b>Админ-режим</b>\n\n"
-        "/stats — статистика\n"
-        "/users — пользователи\n"
-        "/grant USER_ID DAYS — премиум юзеру\n"
-        "/broadcast Текст — рассылка"
-    )
+    uid = message.from_user.id
+    if not ADMIN_IDS and not ADMIN_CHAT_ID:
+        ADMIN_IDS.add(uid)
+        await message.answer(
+            f"✅ <b>Ты теперь админ!</b>\n\n"
+            f"Твой ID: <code>{uid}</code>\n\n"
+            f"<b>Чтобы оставаться админом после перезапуска</b> Railway:\n"
+            f"Variables → <b>ADMIN_CHAT_ID</b> = <code>{uid}</code>\n\n"
+            "<b>Команды админа:</b>\n"
+            "/stats — статистика\n"
+            "/users — последние юзеры\n"
+            "/grant ID DAYS — премиум юзеру\n"
+            "/broadcast Текст — рассылка всем\n"
+            "/myid — узнать свой ID"
+        )
+        return
+    if uid in ADMIN_IDS or uid == ADMIN_CHAT_ID:
+        ADMIN_IDS.add(uid)
+        await message.answer(
+            "✅ <b>Админ-режим</b>\n\n"
+            "/stats /users /grant /broadcast /myid"
+        )
+    else:
+        await message.answer("❌ Админ уже назначен. Нет доступа.")
 
 
 @dp.message(Command("stats"))
