@@ -30,8 +30,9 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 BOT_NAME = "🧠 Умник AI"
 SUPPORT_USERNAME = "@umnik_ai_support"
-MBANK_NUMBER = "+996 700 123 456"
-MBANK_HOLDER = "ДАСТАН К."
+MBANK_NUMBER = "+996 502 052 906"
+MBANK_HOLDER = "АЙДАР У."
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or "0")
 
 FREE_DAILY_LIMIT = 10
 PREMIUM_PRICE_MONTH = 500
@@ -124,6 +125,7 @@ user_promos_used: dict[int, set] = defaultdict(set)
 user_achievements: dict[int, set] = defaultdict(set)
 ADMIN_IDS: set[int] = set()
 pending_premium: dict[int, dict] = {}
+awaiting_screenshot: set[int] = set()
 broadcasts_count = 0
 
 
@@ -436,14 +438,17 @@ async def cb_buy(call: CallbackQuery):
         await call.message.edit_text(
             f"<b>💳 Оплата {'месяца' if period == 'month' else 'года'} Премиум</b>\n\n"
             f"Сумма: <b>{price} сом</b>\n\n"
-            f"<b>МБанк перевод:</b>\n"
+            f"<b>📲 МБанк перевод:</b>\n"
             f"Номер: <code>{MBANK_NUMBER}</code>\n"
             f"Получатель: {MBANK_HOLDER}\n"
             f"Сумма: <b>{price} сом</b>\n"
             f"Комментарий: <code>Премиум {uid}</code>\n\n"
-            "После оплаты нажми кнопку 👇",
+            "После оплаты:\n"
+            "1️⃣ Нажми <b>«Я оплатил»</b>\n"
+            "2️⃣ Отправь <b>скрин чека</b> из МБанк\n"
+            "3️⃣ Жди подтверждения от админа (5-15 мин)\n",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"paid:{period}")],
+                [InlineKeyboardButton(text="✅ Я оплатил — отправить чек", callback_data=f"paid:{period}")],
                 [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_buy")],
             ])
         )
@@ -455,35 +460,172 @@ async def cb_buy(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("paid:"))
 async def cb_paid(call: CallbackQuery):
     uid = call.from_user.id
-    period = call.data.split(":")[1]
-    p = pending_premium.pop(uid, None)
+    p = pending_premium.get(uid)
     if not p:
-        await call.answer("Заявка не найдена"); return
-    days = p["days"]
-    until = (date.today() + timedelta(days=days)).isoformat()
-    user_premium[uid] = until
-    masked = MBANK_NUMBER[:-4] + "XXXX"
+        await call.answer("Заявка не найдена. Начни заново через 💎 Премиум", show_alert=True)
+        return
+    awaiting_screenshot.add(uid)
     try:
         await call.message.edit_text(
-            f"✅ <b>Премиум активирован!</b>\n\n"
-            f"Действует до: <b>{until}</b>\n"
-            f"📤 Уведомление об оплате отправлено на <b>{masked}</b>\n\n"
-            "Безлимит — задавай сколько хочешь! 🚀\n\n"
-            "Напиши /start чтобы продолжить."
+            f"📸 <b>Отправь скрин оплаты</b>\n\n"
+            f"Сумма: {p['price']} сом\n"
+            f"Получатель: {MBANK_HOLDER} ({MBANK_NUMBER})\n\n"
+            "Просто пришли фото чека из МБанк сюда в чат.\n"
+            "Админ проверит и активирует премиум за 5-15 минут ⏰\n\n"
+            "<i>Если ошибка — напиши /cancel</i>"
         )
     except Exception:
         pass
-    await call.answer("Премиум активирован!", show_alert=True)
+    await call.answer("Жду скрин оплаты")
 
 
 @dp.callback_query(F.data == "cancel_buy")
 async def cb_cancel_buy(call: CallbackQuery):
     pending_premium.pop(call.from_user.id, None)
+    awaiting_screenshot.discard(call.from_user.id)
     try:
         await call.message.edit_text("❌ Покупка отменена.\n\nПремиум всегда доступен — /start")
     except Exception:
         pass
     await call.answer()
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message):
+    uid = message.from_user.id
+    pending_premium.pop(uid, None)
+    awaiting_screenshot.discard(uid)
+    await message.answer("❌ Заявка отменена. /start")
+
+
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    uid = message.from_user.id
+    if uid not in awaiting_screenshot:
+        await message.answer("📸 Спасибо за фото, но я работаю с текстом. Пиши вопросы! 📚")
+        return
+    p = pending_premium.get(uid)
+    if not p:
+        awaiting_screenshot.discard(uid)
+        await message.answer("Заявка не найдена. /start")
+        return
+
+    file_id = message.photo[-1].file_id
+    p["screenshot"] = file_id
+    p["status"] = "awaiting_admin"
+    awaiting_screenshot.discard(uid)
+
+    await message.answer(
+        "✅ <b>Чек получен!</b>\n\n"
+        "Отправил админу на проверку.\n"
+        "Премиум активируется в течение <b>5-15 минут</b> ⏰\n\n"
+        "Ты получишь уведомление как только проверят."
+    )
+
+    user_info = message.from_user
+    period_label = "месяц" if p["period"] == "month" else "год"
+    caption = (
+        f"💳 <b>Новая оплата Премиум</b>\n\n"
+        f"Сумма: <b>{p['price']} сом</b>\n"
+        f"Тариф: <b>{period_label}</b>\n"
+        f"Юзер: <a href='tg://user?id={uid}'>{user_info.first_name}</a>"
+        f"{' (@' + user_info.username + ')' if user_info.username else ''}\n"
+        f"ID: <code>{uid}</code>\n"
+        f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve:{uid}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{uid}")],
+    ])
+
+    targets = set(ADMIN_IDS)
+    if ADMIN_CHAT_ID:
+        targets.add(ADMIN_CHAT_ID)
+    sent_count = 0
+    for admin_id in targets:
+        try:
+            await bot.send_photo(admin_id, photo=file_id, caption=caption, reply_markup=kb)
+            sent_count += 1
+        except Exception as e:
+            logging.error(f"Failed to send to admin {admin_id}: {e}")
+    if sent_count == 0:
+        logging.warning(f"No admin received payment from {uid}")
+
+
+@dp.callback_query(F.data.startswith("approve:"))
+async def cb_approve_payment(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS and call.from_user.id != ADMIN_CHAT_ID:
+        await call.answer("Только админ", show_alert=True)
+        return
+    uid = int(call.data.split(":")[1])
+    p = pending_premium.pop(uid, None)
+    if not p:
+        await call.answer("Заявка не найдена / уже обработана", show_alert=True)
+        return
+    days = p["days"]
+    cur_until = user_premium.get(uid)
+    today = date.today()
+    if cur_until and cur_until >= today.isoformat():
+        base = date.fromisoformat(cur_until)
+    else:
+        base = today
+    until = (base + timedelta(days=days)).isoformat()
+    user_premium[uid] = until
+
+    try:
+        await call.message.edit_caption(
+            caption=(call.message.caption or "") + f"\n\n✅ <b>ПОДТВЕРЖДЕНО админом @{call.from_user.username or call.from_user.id}</b>\nПремиум до: {until}"
+        )
+    except Exception:
+        try:
+            await call.message.reply(f"✅ Подтверждено. Премиум до {until}")
+        except Exception:
+            pass
+
+    try:
+        await bot.send_message(
+            uid,
+            f"🎉 <b>Премиум активирован!</b>\n\n"
+            f"Срок: до <b>{until}</b>\n"
+            f"Безлимит вопросов 🚀\n\n"
+            f"Спасибо за оплату ❤️\n"
+            f"Напиши /start или сразу задавай вопрос."
+        )
+    except Exception:
+        pass
+    await call.answer("Премиум активирован")
+
+
+@dp.callback_query(F.data.startswith("reject:"))
+async def cb_reject_payment(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS and call.from_user.id != ADMIN_CHAT_ID:
+        await call.answer("Только админ", show_alert=True)
+        return
+    uid = int(call.data.split(":")[1])
+    p = pending_premium.pop(uid, None)
+    if not p:
+        await call.answer("Уже обработано", show_alert=True)
+        return
+    try:
+        await call.message.edit_caption(
+            caption=(call.message.caption or "") + f"\n\n❌ <b>ОТКЛОНЕНО админом @{call.from_user.username or call.from_user.id}</b>"
+        )
+    except Exception:
+        pass
+    try:
+        await bot.send_message(
+            uid,
+            f"⚠️ <b>Оплата не подтверждена</b>\n\n"
+            f"Возможные причины:\n"
+            f"• Сумма не сходится\n"
+            f"• Скрин нечитаемый\n"
+            f"• Платёж не пришёл\n\n"
+            f"Свяжись с поддержкой: {SUPPORT_USERNAME}\n"
+            f"Или попробуй заново через 💎 Премиум"
+        )
+    except Exception:
+        pass
+    await call.answer("Отклонено")
 
 
 @dp.message(F.text == "🎁 Промокод")
@@ -546,9 +688,9 @@ async def msg_help(message: Message):
 async def msg_support(message: Message):
     await message.answer(
         f"<b>💬 Поддержка</b>\n\n"
-        f"Напиши: {SUPPORT_USERNAME}\n"
-        f"Ответим в 15 минут ⏰\n\n"
-        "Или сообщи о проблеме админу — /report текст"
+        f"Напиши команду:\n"
+        f"<code>/report текст_твоей_проблемы</code>\n\n"
+        f"Сообщение придёт админу — ответит в течение 15 минут ⏰"
     )
 
 
@@ -682,6 +824,14 @@ async def handle_question(message: Message):
     uid = message.from_user.id
     text = message.text.strip()
 
+    if uid in awaiting_screenshot:
+        await message.answer(
+            "📸 Жду <b>скрин оплаты</b> (фото).\n\n"
+            "Пришли картинку из приложения МБанк.\n"
+            "Или нажми /cancel чтобы отменить."
+        )
+        return
+
     upper = text.upper()
     if upper in PROMO_CODES:
         if upper in user_promos_used[uid]:
@@ -793,6 +943,9 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
     logging.info(f"Bot started: @{me.username}")
+    if ADMIN_CHAT_ID:
+        ADMIN_IDS.add(ADMIN_CHAT_ID)
+        logging.info(f"Admin registered: {ADMIN_CHAT_ID}")
     if not GROQ_API_KEY:
         logging.warning("GROQ_API_KEY not set — bot will fail on questions")
     await dp.start_polling(bot)
