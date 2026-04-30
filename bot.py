@@ -28,6 +28,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+POLLINATIONS_URL = "https://text.pollinations.ai/openai"
+POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai")
+
 BOT_NAME = "🧠 Умник AI"
 SUPPORT_USERNAME = "@umnik_ai_support"
 MBANK_NUMBER = "+996 502 052 906"
@@ -823,9 +826,33 @@ async def cmd_broadcast(message: Message):
     await message.answer(f"✅ Отправлено {count}")
 
 
+async def ask_pollinations(messages):
+    payload = {
+        "model": POLLINATIONS_MODEL,
+        "messages": messages,
+        "temperature": 0.4,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post(POLLINATIONS_URL, json=payload)
+            if r.status_code != 200:
+                logging.error(f"Pollinations {r.status_code}: {r.text[:300]}")
+                return None, f"Ошибка ИИ ({r.status_code})"
+            try:
+                data = r.json()
+                return data["choices"][0]["message"]["content"], None
+            except Exception:
+                return r.text, None
+    except httpx.TimeoutException:
+        return None, "ИИ долго думает, попробуй ещё раз"
+    except Exception as e:
+        logging.error(f"Pollinations error: {e}")
+        return None, "Ошибка соединения с ИИ"
+
+
 async def ask_groq(messages):
     if not GROQ_API_KEY:
-        return None, "Не настроен GROQ_API_KEY (попроси админа)"
+        return None, "no_key"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": GROQ_MODEL,
@@ -837,15 +864,24 @@ async def ask_groq(messages):
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(GROQ_URL, json=payload, headers=headers)
             if r.status_code != 200:
-                logging.error(f"Groq {r.status_code}: {r.text}")
-                return None, f"Ошибка ИИ ({r.status_code})"
+                logging.error(f"Groq {r.status_code}: {r.text[:300]}")
+                return None, f"groq_error_{r.status_code}"
             data = r.json()
             return data["choices"][0]["message"]["content"], None
     except httpx.TimeoutException:
-        return None, "ИИ долго думает, попробуй ещё раз"
+        return None, "timeout"
     except Exception as e:
         logging.error(f"Groq error: {e}")
-        return None, "Ошибка соединения с ИИ"
+        return None, "connection_error"
+
+
+async def ask_ai(messages):
+    if GROQ_API_KEY:
+        answer, err = await ask_groq(messages)
+        if answer:
+            return answer, None
+        logging.info(f"Groq failed ({err}), falling back to Pollinations")
+    return await ask_pollinations(messages)
 
 
 @dp.message(F.text)
@@ -913,9 +949,9 @@ async def handle_question(message: Message):
             messages.append({"role": "assistant", "content": h["answer"]})
     messages.append({"role": "user", "content": text})
 
-    answer, err = await ask_groq(messages)
+    answer, err = await ask_ai(messages)
     if err or not answer:
-        await message.answer(f"😔 {err or 'Не получилось ответить'}\n\nПопробуй ещё раз через минуту.")
+        await message.answer(f"😔 ИИ временно недоступен\n\nПопробуй ещё раз через минуту.")
         return
 
     consume_question(uid)
@@ -976,7 +1012,9 @@ async def main():
         ADMIN_IDS.add(ADMIN_CHAT_ID)
         logging.info(f"Admin registered: {ADMIN_CHAT_ID}")
     if not GROQ_API_KEY:
-        logging.warning("GROQ_API_KEY not set — bot will fail on questions")
+        logging.info("GROQ_API_KEY not set — using free Pollinations AI")
+    else:
+        logging.info("Using Groq AI (premium)")
     await dp.start_polling(bot)
 
 
